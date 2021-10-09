@@ -15,9 +15,10 @@ __progname__ = "a2rchery"
 __displayname__ = __progname__ + " by 4am (" + __date__ + ")"
 
 # chunk IDs for .a2r files
-kA2R2 = b"A2R2"
+kA2R3 = b"A2R3"
 kINFO = b"INFO"
-kSTRM = b"STRM"
+kRWCP = b"RWCP"
+kSLVD = b"SLVD"
 kMETA = b"META"
 # other things defined in the .a2r specification
 kLanguages = ("English","Spanish","French","German","Chinese","Japanese","Italian","Dutch","Portuguese","Danish","Finnish","Norwegian","Swedish","Russian","Polish","Turkish","Arabic","Thai","Czech","Hungarian","Catalan","Croatian","Greek","Hebrew","Romanian","Slovak","Ukrainian","Indonesian","Malay","Vietnamese","Other")
@@ -39,7 +40,7 @@ class A2RError(Exception): pass # base class
 class A2REOFError(A2RError): pass
 class A2RFormatError(A2RError): pass
 class A2RHeaderError(A2RError): pass
-class A2RHeaderError_NoA2R2(A2RHeaderError): pass
+class A2RHeaderError_NoA2R3(A2RHeaderError): pass
 class A2RHeaderError_NoFF(A2RHeaderError): pass
 class A2RHeaderError_NoLF(A2RHeaderError): pass
 class A2RINFOFormatError(A2RFormatError): pass
@@ -49,7 +50,8 @@ class A2RINFOFormatError_BadWriteProtected(A2RINFOFormatError): pass
 class A2RINFOFormatError_BadSynchronized(A2RINFOFormatError): pass
 class A2RINFOFormatError_BadCleaned(A2RINFOFormatError): pass
 class A2RINFOFormatError_BadCreator(A2RINFOFormatError): pass
-class A2RSTRMFormatError(A2RFormatError): pass
+class A2RINFOFormatError_BadHard_sector_count(A2RINFOFormatError): pass
+class A2RRWCPFormatError(A2RFormatError): pass
 class A2RMETAFormatError(A2RFormatError): pass
 class A2RMETAFormatError_DuplicateKey(A2RFormatError): pass
 class A2RMETAFormatError_BadValue(A2RFormatError): pass
@@ -91,13 +93,16 @@ class A2RValidator:
         raise_if(version != b'\x01', A2RINFOFormatError_BadVersion, "Unknown version (expected 1, found %s)" % version)
 
     def validate_info_disk_type(self, disk_type):
-        raise_if(disk_type not in (b'\x01',b'\x02'), A2RINFOFormatError_BadDiskType, "Unknown disk type (expected 1 or 2, found %s)" % disk_type)
+        raise_if(disk_type not in (b'\x01',b'\x02',b'\x03',b'\x04',b'\x05',b'\x06'), A2RINFOFormatError_BadDiskType, "Unknown disk type (expected 1 - 6, found %s)" % disk_type)
 
     def validate_info_write_protected(self, write_protected):
         raise_if(write_protected not in (b'\x00',b'\x01'), A2RINFOFormatError_BadWriteProtected, "Unknown write protected flag (expected 0 or 1, found %s)" % write_protected)
 
     def validate_info_synchronized(self, synchronized):
         raise_if(synchronized not in (b'\x00',b'\x01'), A2RINFOFormatError_BadSynchronized, "Unknown synchronized flag (expected 0, or 1, found %s)" % synchronized)
+
+    def validate_info_hard_sector_count(self, hard_sector_count):
+        raise_if(hard_sector_count not in (b'\x00', b'\x01'), A2RINFOFormatError_BadHard_sector_count, "Unknown Hard Sector flag (expected 0, or 1, found %s)" % hard_sector_count)
 
     def validate_info_creator(self, creator_as_bytes):
         raise_if(len(creator_as_bytes) > 32, A2RINFOFormatError_BadCreator, "Creator is longer than 32 bytes")
@@ -153,22 +158,27 @@ class A2RReader(DiskImage, A2RValidator):
             while True:
                 chunk_id = f.read(4)
                 if not chunk_id: break
+                print('read_IDa')
                 raise_if(len(chunk_id) != 4, A2REOFError, sEOF)
+                print('read_IDb')
                 chunk_size_raw = f.read(4)
                 raise_if(len(chunk_size_raw) != 4, A2REOFError, sEOF)
+                print('read2_raw')
                 chunk_size = from_uint32(chunk_size_raw)
                 data = f.read(chunk_size)
                 raise_if(len(data) != chunk_size, A2REOFError, sEOF)
+                print('read_size')
+
                 if chunk_id == kINFO:
-                    raise_if(chunk_size != 36, A2RFormatError, sBadChunkSize)
+                    raise_if(chunk_size != 37, A2RFormatError, sBadChunkSize)
                     self.__process_info(data)
-                elif chunk_id == kSTRM:
-                    self.__process_strm(data)
+                elif chunk_id == kRWCP:
+                    self.__process_rwcp(data)
                 elif chunk_id == kMETA:
                     self.__process_meta(data)
 
     def __process_header(self, data):
-        raise_if(data[:4] != kA2R2, A2RHeaderError_NoA2R2, "Magic string 'A2R2' not present at offset 0")
+        raise_if(data[:4] != kA2R3, A2RHeaderError_NoA2R3, "Magic string 'A2R3' not present at offset 0")
         raise_if(data[4] != 0xFF, A2RHeaderError_NoFF, "Magic byte 0xFF not present at offset 4")
         raise_if(data[5:8] != b"\x0A\x0D\x0A", A2RHeaderError_NoLF, "Magic bytes 0x0A0D0A not present at offset 5")
 
@@ -182,14 +192,17 @@ class A2RReader(DiskImage, A2RValidator):
         synchronized = data[35]
         self.validate_info_synchronized(to_uint8(synchronized))
         creator = self.decode_info_creator(data[1:33])
+        hard_sector_count = data[36]
+        self.validate_info_hard_sector_count(to_uint8(hard_sector_count))
         self.info["version"] = version # int
         self.info["disk_type"] = disk_type # int
         self.info["write_protected"] = (write_protected == 1) # boolean
         self.info["synchronized"] = (synchronized == 1) # boolean
         self.info["creator"] = creator # string
+        self.info["hard_sector_count"] = (hard_sector_count == 1) # boolean
 
-    def __process_strm(self, data):
-        raise_if(data[-1] != 0xFF, A2RSTRMFormatError, "Missing phase reset at end of STRM chunk")
+    def __process_rwcp(self, data):
+        raise_if(data[-1] != 0xFF, A2RRWCPFormatError, "Missing phase reset at end of RWCP chunk")
         i = 0
         while i < len(data) - 1:
             location = data[i]
@@ -240,7 +253,7 @@ class A2RWriter(A2RValidator):
 
     def build_head(self):
         chunk = bytearray()
-        chunk.extend(kA2R2) # magic bytes
+        chunk.extend(kA2R3) # magic bytes
         chunk.extend(b"\xFF\x0A\x0D\x0A") # more magic bytes
         return chunk
 
@@ -264,7 +277,7 @@ class A2RWriter(A2RValidator):
         chunk.extend(synchronized_raw) # tracks synchronized (0=no, 1=yes)
         return chunk
 
-    def build_strm(self):
+    def build_rwcp(self):
         data_raw = bytearray()
         for location in self.flux.keys():
             for capture in self.flux[location]:
@@ -275,7 +288,7 @@ class A2RWriter(A2RValidator):
                 data_raw.extend(capture["data"])
         data_raw.extend(b"\xFF")
         chunk = bytearray()
-        chunk.extend(kSTRM) # chunk ID
+        chunk.extend(kRWCP) # chunk ID
         chunk.extend(to_uint32(len(data_raw))) # chunk size
         chunk.extend(data_raw) # all stream data
         return chunk
@@ -310,7 +323,7 @@ class A2RWriter(A2RValidator):
     def write(self, stream):
         stream.write(self.build_head())
         stream.write(self.build_info())
-        stream.write(self.build_strm())
+        stream.write(self.build_rwcp())
         stream.write(self.build_meta())
 
 #---------- command line interface ----------
@@ -357,11 +370,13 @@ class CommandDump(BaseCommand):
         print("INFO:  Write protected:".ljust(self.kWidth),     dNoYes[self.a2r_image.info["write_protected"]])
         print("INFO:  Track synchronized:".ljust(self.kWidth),  dNoYes[self.a2r_image.info["synchronized"]])
         print("INFO:  Creator:".ljust(self.kWidth),             self.a2r_image.info["creator"])
+        print("INFO:  Hard Sector Count:".ljust(self.kWidth),   dNoYes[self.a2r_image.info["hard_sector_count"]])
+
 
     def print_flux(self):
         for location in self.a2r_image.flux:
             for flux_record in self.a2r_image.flux[location]:
-                print(("STRM:  Track %d%s" % (location/4, tQuarters[location%4])).ljust(self.kWidth),
+                print(("RWCP:  Track %d%s" % (location/4, tQuarters[location%4])).ljust(self.kWidth),
                       dTiming[flux_record["capture_type"]], "capture,",
                       flux_record["tick_count"], "ticks")
 
